@@ -158,58 +158,7 @@ bool upsertCode(const StoredCode &c) {
  Map a protocol name string (as returned by typeToString / sent by Pi) to
  a decode_type_t value.  Returns UNKNOWN on no match.
 */
-decode_type_t typeFromString(const char *s) {
-  if (!s)
-    return UNKNOWN;
-  String t(s);
-  t.toUpperCase();
-
-  if (t == "NEC")
-    return NEC;
-  if (t == "SONY")
-    return SONY;
-  if (t == "RC5")
-    return RC5;
-  if (t == "RC6")
-    return RC6;
-  if (t == "SAMSUNG")
-    return SAMSUNG;
-  if (t == "LG")
-    return LG;
-  if (t == "SHARP")
-    return SHARP;
-  if (t == "PANASONIC")
-    return PANASONIC;
-  if (t == "JVC")
-    return JVC;
-  if (t == "WHYNTER")
-    return WHYNTER;
-  if (t == "SANYO")
-    return SANYO;
-  if (t == "MITSUBISHI")
-    return MITSUBISHI;
-  if (t == "DENON")
-    return DENON;
-  if (t == "BOSEWAVE")
-    return BOSEWAVE;
-  if (t == "MAGIQUEST")
-    return MAGIQUEST;
-  if (t == "PIONEER")
-    return PIONEER;
-  if (t == "FUJITSU_AC")
-    return FUJITSU_AC;
-  if (t == "DAIKIN")
-    return DAIKIN;
-  if (t == "HITACHI_AC")
-    return HITACHI_AC;
-  if (t == "KELVINATOR")
-    return KELVINATOR;
-  if (t == "MIDEA")
-    return MIDEA;
-  if (t == "TOSHIBA_AC")
-    return TOSHIBA_AC;
-  return UNKNOWN;
-}
+decode_type_t typeFromString(const char *s) { return strToDecodeType(s); }
 
 /*
  Send JSON reply over Serial
