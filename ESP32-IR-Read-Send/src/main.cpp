@@ -107,19 +107,50 @@ int findCodeIndex(const String &name) {
 
 /*
  Insert or overwrite existing code.
- If overwriting a RAW entry the old heap buffer is freed first to avoid leaks.
+
+ Always deep-copies RAW data: the stored slot owns its own heap buffer.
+ Callers may pass a StoredCode with rawbuf pointing to a stack/static
+ temp array — upsertCode allocates a fresh copy and does NOT take ownership
+ of the caller's buffer.
 */
 bool upsertCode(const StoredCode &c) {
+  // Determine destination slot
   int idx = findCodeIndex(c.name);
+  StoredCode *dst;
+
   if (idx >= 0) {
-    // Free old RAW buffer before overwrite
-    freeRaw(codes[idx]);
-    codes[idx] = c;
-    return true;
+    dst = &codes[idx];
+    freeRaw(*dst); // free any old RAW buffer owned by this slot
+  } else {
+    if (codeCount >= kMaxCodes)
+      return false;
+    dst = &codes[codeCount];
+    dst->rawbuf = nullptr; // slot is uninitialised; make sure freeRaw is safe
+    dst->rawlen = 0;
   }
-  if (codeCount >= kMaxCodes)
-    return false;
-  codes[codeCount++] = c;
+
+  // Copy all scalar fields
+  dst->name = c.name;
+  dst->isRaw = c.isRaw;
+  dst->protocol = c.protocol;
+  dst->value = c.value;
+  dst->bits = c.bits;
+  dst->freq = c.freq;
+
+  // Deep-copy RAW buffer so the stored slot is the sole owner
+  if (c.isRaw) {
+    if (!c.rawbuf || c.rawlen == 0)
+      return false;
+    dst->rawbuf = (uint16_t *)malloc(c.rawlen * sizeof(uint16_t));
+    if (!dst->rawbuf)
+      return false;
+    memcpy(dst->rawbuf, c.rawbuf, c.rawlen * sizeof(uint16_t));
+    dst->rawlen = c.rawlen;
+  }
+
+  if (idx < 0)
+    codeCount++;
+
   return true;
 }
 
@@ -239,8 +270,9 @@ bool learnOnce(StoredCode &out, uint32_t timeoutMs) {
 
         uint16_t len = min(results.rawlen, kCaptureBufferSize);
 
-        // Temporary local buffer — copy µs values, skip index 0 (mark start)
-        uint16_t tmp[kCaptureBufferSize];
+        // Static temp buffer — µs values, skip index 0 (mark start).
+        // learnOnce does NOT allocate heap; upsertCode deep-copies from here.
+        static uint16_t tmp[kCaptureBufferSize];
         uint16_t rawLen = 0;
         for (uint16_t i = 1; i < len; i++) {
           uint32_t us = results.rawbuf[i] * kRawTick;
@@ -249,10 +281,8 @@ bool learnOnce(StoredCode &out, uint32_t timeoutMs) {
           tmp[rawLen++] = (uint16_t)us;
         }
 
-        if (!allocAndCopyRaw(out, tmp, rawLen)) {
-          irrecv.resume();
-          continue; // malloc failed, try again
-        }
+        out.rawbuf = tmp; // points at static; upsertCode will deep-copy
+        out.rawlen = rawLen;
         out.isRaw = true;
       }
 
@@ -426,25 +456,25 @@ void handleDefineRaw(const JsonDocument &cmd) {
   if (len > kMaxRawLen)
     return replyErr("raw_too_long");
 
-  // Copy data array into temporary buffer, then into heap-allocated slot
-  uint16_t tmp[kMaxRawLen];
+  // Static temp buffer — 1 KB, kept off the task stack.
+  // upsertCode() deep-copies from here into the stored slot's own heap block.
+  static uint16_t tmp[kMaxRawLen];
   for (uint16_t i = 0; i < len; i++) {
     uint32_t v = arr[i] | 0;
     tmp[i] = (uint16_t)(v > 0xFFFF ? 0xFFFF : v);
   }
 
+  // Build a lightweight descriptor pointing at tmp.
+  // upsertCode() will malloc its own copy — this sc never owns heap memory.
   StoredCode sc;
   sc.name = name;
   sc.isRaw = true;
   sc.freq = freq;
+  sc.rawbuf = tmp;
+  sc.rawlen = len;
 
-  if (!allocAndCopyRaw(sc, tmp, len))
-    return replyErr("malloc_failed");
-
-  if (!upsertCode(sc)) {
-    freeRaw(sc);
+  if (!upsertCode(sc))
     return replyErr("storage_full");
-  }
 
   replyOk("defined");
 }
@@ -504,13 +534,17 @@ void loop() {
         StoredCode sc;
         sc.name = cmd["name"] | "";
 
+        // Reject empty name before committing to listen
+        if (sc.name.length() == 0)
+          return replyErr("missing_name");
+
         replyOk("learn_ready");
 
         if (!learnOnce(sc, cmd["timeout_ms"] | 15000))
           return replyErr("learn_timeout");
 
-        upsertCode(sc);
-        emitLearnedResponse(sc);
+        upsertCode(sc);          // deep-copies RAW buffer into codes[]
+        emitLearnedResponse(sc); // sc.rawbuf points to static tmp — not heap
       }
 
       else if (!strcmp(command, "send")) {

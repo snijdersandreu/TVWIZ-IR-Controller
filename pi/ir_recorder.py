@@ -110,6 +110,28 @@ def test_code(ser: serial.Serial, cache: dict) -> None:
         return
     print("  Codes in memory: " + ", ".join(cache.keys()))
     name = input("  Code name to send: ").strip()
+    if name not in cache:
+        print(f"  [!] '{name}' not in local cache. Learn it first with 'l'.")
+        return
+
+    payload = cache[name]
+    t = payload.get("type", "").upper()
+
+    # Push code into ESP32 RAM first (works even after an ESP32 reboot)
+    if t == "RAW":
+        push_cmd = {"cmd": "define_raw", "name": name,
+                    "freq": payload.get("freq", 38000),
+                    "data": payload["data"]}
+    else:
+        push_cmd = {"cmd": "define", "name": name, "type": t,
+                    "value": str(payload.get("value", "0x0")),
+                    "bits": payload.get("bits", 32)}
+
+    push_resp = send_cmd(ser, push_cmd)
+    if not push_resp.get("ok"):
+        print(f"  [ERROR] Could not push '{name}' to ESP32: {push_resp.get('err')}")
+        return
+
     resp = send_cmd(ser, {"cmd": "send", "name": name, "repeats": 0})
     if resp.get("ok"):
         print(f"  ✓ Sent '{name}'.")

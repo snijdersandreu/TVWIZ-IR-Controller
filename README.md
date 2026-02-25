@@ -312,14 +312,13 @@ Maximum `data` array length: **512** entries.
 | `learn_timeout` | No signal received within `timeout_ms` |
 | `not_found` | No code with that name exists |
 | `send_failed` | Protocol not supported by irsend |
-| `missing_name` | `name` field absent in `define`/`define_raw` |
+| `missing_name` | `name` field absent or empty in `learn`/`define`/`define_raw` |
 | `missing_type` | `type` field absent in `define` |
 | `missing_value` | `value` field absent in `define` |
 | `unknown_type` | Protocol string not recognised |
 | `missing_data` | `data` field absent in `define_raw` |
 | `raw_too_long` | `data` array exceeds 512 entries |
-| `malloc_failed` | Heap exhausted (too many RAW codes) |
-| `storage_full` | 16-code RAM limit reached |
+| `storage_full` | 16-code limit reached, or heap exhausted for RAW allocation |
 
 ---
 
