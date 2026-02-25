@@ -1,18 +1,21 @@
 [Unit]
 Description=TVWIZ IR Boot Sender
-# Wait for the USB serial device to be enumerated
-After=dev-ttyUSB0.device
-Requires=dev-ttyUSB0.device
+# Wait for multi-user target; the Python script retries serial open internally.
+# If you want to tie it to a specific USB device, replace the line below with:
+#   After=dev-serial-by\x2did-usb-<your-id>.device
+#   Requires=dev-serial-by\x2did-usb-<your-id>.device
+# Find your stable ID with: ls /dev/serial/by-id/
+After=multi-user.target
 
 [Service]
 Type=oneshot
+# Change 'pi' to your actual login user if different
 User=pi
 WorkingDirectory=/home/pi/tvwiz
 ExecStart=/usr/bin/python3 /home/pi/tvwiz/ir_boot_sender.py --port /dev/ttyUSB0
 StandardOutput=journal
 StandardError=journal
-# Give the ESP32 a moment after udev brings up the device
-ExecStartPre=/bin/sleep 2
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target

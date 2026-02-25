@@ -2,21 +2,22 @@
 """
 ir_recorder.py — Interactive IR code recorder for TVWIZ IR Controller
 ----------------------------------------------------------------------
-Run this script on a Raspberry Pi to learn and test IR codes via the
-ESP32 IR blaster connected over USB serial.
+Run this on a Raspberry Pi connected to the ESP32 over USB serial.
 
-Learned codes are saved to codes.json in the same directory.
+Learned codes are cached in memory (with their full signal payloads) and
+written to boot_config.json when you press 'w'.  boot_config.json is the
+single source of truth for ir_boot_sender.py.
 
 Usage:
     python3 ir_recorder.py [--port /dev/ttyUSB0] [--baud 115200]
 
-Menu options:
-    l  - Learn a new IR code (give it a name/descriptor)
-    t  - Test/send a learned code
-    s  - Show all learned codes
-    e  - Erase a code
-    w  - Write/save codes to codes.json
-    q  - Quit
+Menu:
+    l  — Learn a new IR code  (stores full payload in memory)
+    t  — Test / send a code   (fires the code from ESP32 RAM)
+    s  — Show codes in memory + ESP32 RAM status
+    e  — Erase a code from both memory and ESP32 RAM
+    w  — Write boot_config.json  (self-contained, ready for boot sender)
+    q  — Quit
 """
 
 import serial
@@ -26,16 +27,21 @@ import argparse
 import os
 import sys
 
-CODES_FILE = os.path.join(os.path.dirname(__file__), "codes.json")
+BOOT_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "boot_config.json")
 DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 115200
-LEARN_TIMEOUT_MS = 15000  # 15 seconds to point the remote
+LEARN_TIMEOUT_MS = 15000
 
+
+# ---------------------------------------------------------------------------
+# Serial helpers
+# ---------------------------------------------------------------------------
 
 def open_serial(port: str, baud: int) -> serial.Serial:
     try:
-        s = serial.Serial(port, baud, timeout=5)
-        time.sleep(1.5)  # allow ESP32 to boot/reset
+        s = serial.Serial(port, baud, timeout=10)
+        time.sleep(1.5)          # let ESP32 finish boot/reset
+        s.reset_input_buffer()   # discard the boot "ok"/"boot" message
         return s
     except serial.SerialException as exc:
         print(f"[ERROR] Cannot open {port}: {exc}")
@@ -43,13 +49,15 @@ def open_serial(port: str, baud: int) -> serial.Serial:
 
 
 def send_cmd(ser: serial.Serial, cmd: dict) -> dict:
-    """Send a JSON command and return the first JSON response."""
-    line = json.dumps(cmd) + "\n"
-    ser.write(line.encode())
+    """Send a JSON command and read the first response line."""
+    ser.write((json.dumps(cmd) + "\n").encode())
     raw = ser.readline()
     if not raw:
         return {"ok": False, "err": "no_response"}
-    return json.loads(raw.decode().strip())
+    try:
+        return json.loads(raw.decode().strip())
+    except json.JSONDecodeError as exc:
+        return {"ok": False, "err": f"json_parse: {exc}"}
 
 
 def ping(ser: serial.Serial) -> bool:
@@ -57,168 +65,181 @@ def ping(ser: serial.Serial) -> bool:
     return resp.get("ok") and resp.get("msg") == "pong"
 
 
-def learn_code(ser: serial.Serial) -> None:
-    name = input("  Enter a descriptor for this code (e.g. tv1_power): ").strip()
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def learn_code(ser: serial.Serial, cache: dict) -> None:
+    name = input("  Descriptor for this code (e.g. tv1_power): ").strip()
     if not name:
         print("  [!] Name cannot be empty.")
         return
 
-    print(f"  Sending learn command… point your remote at the IR receiver now.")
+    print(f"  Sending learn… point remote at IR receiver now.")
     ack = send_cmd(ser, {"cmd": "learn", "name": name, "timeout_ms": LEARN_TIMEOUT_MS})
     if not ack.get("ok"):
         print(f"  [ERROR] {ack.get('err', 'unknown')}")
         return
     if ack.get("msg") == "learn_ready":
-        print(f"  ESP32 ready — you have {LEARN_TIMEOUT_MS // 1000}s to press the button…")
+        print(f"  ESP32 ready — {LEARN_TIMEOUT_MS // 1000}s to press the button…")
 
-    # Wait for the captured result (second response)
+    # Second response: the captured payload (or an error)
     raw = ser.readline()
     if not raw:
-        print("  [ERROR] Timed out waiting for captured signal.")
+        print("  [ERROR] Timed out waiting for capture result.")
         return
-    result = json.loads(raw.decode().strip())
+    try:
+        result = json.loads(raw.decode().strip())
+    except json.JSONDecodeError:
+        print("  [ERROR] Malformed response from ESP32.")
+        return
+
     if not result.get("ok"):
         print(f"  [ERROR] {result.get('err', 'unknown')}")
         return
 
-    print(f"  ✓ Captured: {result}")
-    print("  Code is stored in ESP32 RAM. Use 'w' to save it to codes.json.")
+    # Store the full payload in memory
+    cache[name] = result
+    print(f"  ✓ Captured and cached: {result}")
+    print("  Press 'w' to write boot_config.json when ready.")
 
 
-def test_code(ser: serial.Serial) -> None:
-    name = input("  Enter the code name to send: ").strip()
+def test_code(ser: serial.Serial, cache: dict) -> None:
+    if not cache:
+        print("  (no codes in memory — learn something first)")
+        return
+    print("  Codes in memory: " + ", ".join(cache.keys()))
+    name = input("  Code name to send: ").strip()
     resp = send_cmd(ser, {"cmd": "send", "name": name, "repeats": 0})
     if resp.get("ok"):
-        print(f"  ✓ Sent '{name}' successfully.")
+        print(f"  ✓ Sent '{name}'.")
     else:
         print(f"  [ERROR] {resp.get('err', 'unknown')}")
 
 
-def list_codes(ser: serial.Serial) -> None:
+def show_codes(ser: serial.Serial, cache: dict) -> None:
+    if not cache:
+        print("  (no codes in memory)")
+    else:
+        print(f"  {'Name':<30} {'Type':<12} {'Details'}")
+        print(f"  {'-'*30} {'-'*12} {'-'*20}")
+        for name, payload in cache.items():
+            t = payload.get("type", "?")
+            if t == "RAW":
+                detail = f"freq={payload.get('freq',38000)} Hz, {len(payload.get('data',[]))} samples"
+            else:
+                detail = f"value={payload.get('value','?')} bits={payload.get('bits','?')}"
+            print(f"  {name:<30} {t:<12} {detail}")
+
+    # Also show what's currently in ESP32 RAM
     resp = send_cmd(ser, {"cmd": "list"})
-    if not resp.get("ok"):
-        print(f"  [ERROR] {resp.get('err', 'unknown')}")
-        return
-    codes = resp.get("codes", [])
-    if not codes:
-        print("  (no codes stored in ESP32 RAM)")
-        return
-    print(f"  {'Name':<30} {'Type'}")
-    print(f"  {'-'*30} {'-'*10}")
-    for c in codes:
-        print(f"  {c['name']:<30} {c.get('type', '?')}")
-
-
-def erase_code(ser: serial.Serial) -> None:
-    name = input("  Enter the code name to erase: ").strip()
-    resp = send_cmd(ser, {"cmd": "erase", "name": name})
     if resp.get("ok"):
-        print(f"  ✓ Erased '{name}'.")
+        esp_codes = resp.get("codes", [])
+        print(f"\n  ESP32 RAM ({len(esp_codes)} code(s)): " +
+              (", ".join(c["name"] for c in esp_codes) if esp_codes else "(empty)"))
+
+
+def erase_code(ser: serial.Serial, cache: dict) -> None:
+    name = input("  Code name to erase: ").strip()
+    removed_local = cache.pop(name, None)
+    resp = send_cmd(ser, {"cmd": "erase", "name": name})
+    if resp.get("ok") or removed_local:
+        lines = []
+        if removed_local:
+            lines.append("removed from memory")
+        if resp.get("ok"):
+            lines.append("erased from ESP32 RAM")
+        print(f"  ✓ '{name}': " + " + ".join(lines) + ".")
     else:
-        print(f"  [ERROR] {resp.get('err', 'unknown')}")
+        print(f"  [ERROR] {resp.get('err', 'not_found')}")
 
 
-def save_codes(ser: serial.Serial) -> None:
-    """
-    Fetch all codes metadata via 'list', then ask for any missing context
-    and persist a codes.json that the boot script can consume.
-
-    Note: The ESP32 stores the raw signal in RAM only. This function saves
-    the *name* and *type* as a manifest so the boot script knows which names
-    to send.  The ESP32 must still have the codes in RAM (or be re-learned)
-    during the same session for the boot script to work.
-
-    For a permanent store you would need to implement a 'dump' command in the
-    firmware that returns the full signal data; this scaffold is ready to be
-    extended.
-    """
-    resp = send_cmd(ser, {"cmd": "list"})
-    if not resp.get("ok"):
-        print(f"  [ERROR] {resp.get('err', 'unknown')}")
-        return
-    codes = resp.get("codes", [])
-    if not codes:
-        print("  (nothing to save)")
+def save_codes(cache: dict) -> None:
+    if not cache:
+        print("  (no codes in memory to save — learn some first)")
         return
 
-    # Path for boot config
-    boot_cfg_path = os.path.join(os.path.dirname(__file__), "boot_config.json")
-
+    # Load existing config to preserve send_on_boot / description edits
     existing = {}
-    if os.path.exists(boot_cfg_path):
-        with open(boot_cfg_path) as f:
+    if os.path.exists(BOOT_CONFIG_FILE):
+        with open(BOOT_CONFIG_FILE) as f:
             try:
                 existing = json.load(f)
             except json.JSONDecodeError:
                 pass
 
-    # Merge new codes into existing config
-    config = existing.copy()
-    for c in codes:
-        name = c["name"]
-        if name not in config:
-            config[name] = {
-                "type": c.get("type", "UNKNOWN"),
-                "send_on_boot": False,
-                "description": "",
-            }
+    boot_cfg = {}
+    for name, payload in cache.items():
+        t = payload.get("type", "UNKNOWN")
+        entry = {
+            "type": t,
+            # Preserve user edits if the code already existed
+            "send_on_boot": existing.get(name, {}).get("send_on_boot", False),
+            "description":  existing.get(name, {}).get("description", ""),
+            "delay_before_ms": existing.get(name, {}).get("delay_before_ms", 0),
+        }
+        if t == "RAW":
+            entry["freq"] = payload.get("freq", 38000)
+            entry["data"] = payload["data"]
+        else:
+            entry["bits"]  = payload.get("bits", 32)
+            entry["value"] = payload.get("value", "0x0")
 
-    with open(boot_cfg_path, "w") as f:
-        json.dump(config, f, indent=2)
+        boot_cfg[name] = entry
 
-    print(f"  ✓ Saved {len(codes)} code(s) to {boot_cfg_path}")
-    print("  Edit boot_config.json to set 'send_on_boot': true for codes")
-    print("  that should be fired when the Pi starts up.")
+    with open(BOOT_CONFIG_FILE, "w") as f:
+        json.dump(boot_cfg, f, indent=2)
 
+    print(f"  ✓ Saved {len(boot_cfg)} code(s) to {BOOT_CONFIG_FILE}")
+    print("  Set 'send_on_boot': true for codes you want fired at Pi startup.")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="TVWIZ IR Recorder")
-    parser.add_argument("--port", default=DEFAULT_PORT, help="Serial port of the ESP32")
-    parser.add_argument("--baud", type=int, default=DEFAULT_BAUD, help="Baud rate")
+    parser.add_argument("--port", default=DEFAULT_PORT)
+    parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     args = parser.parse_args()
 
-    print("=" * 50)
+    print("=" * 52)
     print("  TVWIZ IR Recorder")
-    print(f"  Port: {args.port}  Baud: {args.baud}")
-    print("=" * 50)
+    print(f"  Port: {args.port}   Baud: {args.baud}")
+    print("=" * 52)
 
     ser = open_serial(args.port, args.baud)
 
-    print("  Pinging ESP32…", end=" ")
+    print("  Pinging ESP32…", end=" ", flush=True)
     if ping(ser):
         print("OK ✓")
     else:
-        print("FAILED — check connection and try again.")
+        print("FAILED — check USB connection and try again.")
         ser.close()
         sys.exit(1)
 
+    # In-memory cache: name → full ESP32 JSON payload
+    cache: dict = {}
+
     MENU = """
-  Commands:
-    l  — Learn a new IR code
-    t  — Test/send a code
-    s  — Show codes in ESP32 RAM
-    e  — Erase a code from ESP32 RAM
-    w  — Write codes to boot_config.json
-    q  — Quit
-"""
+  l  — Learn a new IR code
+  t  — Test / send a code
+  s  — Show codes
+  e  — Erase a code
+  w  — Write boot_config.json
+  q  — Quit"""
 
     while True:
         print(MENU)
         choice = input("  > ").strip().lower()
-        if choice == "l":
-            learn_code(ser)
-        elif choice == "t":
-            test_code(ser)
-        elif choice == "s":
-            list_codes(ser)
-        elif choice == "e":
-            erase_code(ser)
-        elif choice == "w":
-            save_codes(ser)
-        elif choice == "q":
-            break
-        else:
-            print("  Unknown command.")
+        if   choice == "l": learn_code(ser, cache)
+        elif choice == "t": test_code(ser, cache)
+        elif choice == "s": show_codes(ser, cache)
+        elif choice == "e": erase_code(ser, cache)
+        elif choice == "w": save_codes(cache)
+        elif choice == "q": break
+        else: print("  Unknown command.")
 
     ser.close()
     print("  Bye!")

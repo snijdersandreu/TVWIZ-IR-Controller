@@ -133,15 +133,15 @@ python3 ir_recorder.py --port /dev/ttyUSB0
 Commands:
   l  — Learn a new IR code
   t  — Test/send a code
-  s  — Show codes in ESP32 RAM
-  e  — Erase a code from ESP32 RAM
-  w  — Write codes to boot_config.json
+  s  — Show codes in local memory cache + ESP32 RAM status
+  e  — Erase a code from both memory and ESP32 RAM
+  w  — Write boot_config.json
   q  — Quit
 ```
 
 ### Workflow
 
-1. **Learn** — Press `l`, enter a descriptive name (e.g. `tv1_power`), then point your remote at the IR receiver and press the button. The code is captured and held in ESP32 RAM.
+1. **Learn** — Press `l`, enter a descriptive name (e.g. `tv1_power`), then point your remote at the IR receiver and press the button. The code is captured by the ESP32, stored in its RAM, **and the full signal payload is cached in Python memory** — this is what gets written to `boot_config.json`.
 2. **Test** — Press `t`, enter the name. The ESP32 immediately blasts the code — check that your TV responds.
 3. **Repeat** for every button you need.
 4. **Save** — Press `w`. This writes `boot_config.json` with all learned codes.
@@ -234,7 +234,7 @@ journalctl -u tvwiz-ir.service -f
 ```
 
 > [!TIP]
-> `tvwiz-ir.service` uses `After=dev-ttyUSB0.device` so systemd will wait for the ESP32 USB device to enumerate before starting the script — even if the ESP32 takes a few seconds after boot.
+> The service uses `After=multi-user.target` and the Python script retries opening the serial port up to 5 times internally, so it handles slow ESP32 enumeration without fragile per-device systemd ordering. To pin to a specific USB device, find its stable ID with `ls /dev/serial/by-id/` and update `--port` in the service file.
 
 ---
 
@@ -282,6 +282,24 @@ RAW fallback:
 → {"ok": true, "msg": "erased"}
 ```
 
+### `define` — Load a decoded code from Pi into ESP32 RAM
+*Used by `ir_boot_sender.py` at boot time.*
+```json
+{"cmd": "define", "name": "tv1_power", "type": "NEC", "value": "0x20DF10EF", "bits": 32}
+→ {"ok": true, "msg": "defined"}
+```
+
+Supported `type` values: `NEC`, `SONY`, `RC5`, `RC6`, `SAMSUNG`, `LG`, `SHARP`, `PANASONIC`, `JVC`, `DENON`, `MITSUBISHI`, `BOSEWAVE`, `PIONEER`, `DAIKIN`, `FUJITSU_AC`, `HITACHI_AC`, `KELVINATOR`, `MIDEA`, `TOSHIBA_AC` (case-insensitive).
+
+### `define_raw` — Load a RAW code from Pi into ESP32 RAM
+*Used by `ir_boot_sender.py` at boot time.*
+```json
+{"cmd": "define_raw", "name": "tv2_power", "freq": 38000, "data": [9024, 4512, 564, ...]}
+→ {"ok": true, "msg": "defined"}
+```
+
+Maximum `data` array length: **512** entries.
+
 ### Error responses
 ```json
 {"ok": false, "err": "<error_string>"}
@@ -294,6 +312,14 @@ RAW fallback:
 | `learn_timeout` | No signal received within `timeout_ms` |
 | `not_found` | No code with that name exists |
 | `send_failed` | Protocol not supported by irsend |
+| `missing_name` | `name` field absent in `define`/`define_raw` |
+| `missing_type` | `type` field absent in `define` |
+| `missing_value` | `value` field absent in `define` |
+| `unknown_type` | Protocol string not recognised |
+| `missing_data` | `data` field absent in `define_raw` |
+| `raw_too_long` | `data` array exceeds 512 entries |
+| `malloc_failed` | Heap exhausted (too many RAW codes) |
+| `storage_full` | 16-code RAM limit reached |
 
 ---
 
@@ -302,8 +328,9 @@ RAW fallback:
 | Parameter | Value |
 |-----------|-------|
 | Max stored codes | **16** (RAM only, lost on reboot) |
-| Max RAW buffer entries | **256** per code |
-| Carrier frequency (RAW) | 38 kHz |
+| Max RAW buffer entries | **512** per code (`define_raw`) / **255** captured (`learn`) |
+| RAW memory | Heap-allocated per code — freed on `erase` or overwrite |
+| Carrier frequency (RAW) | 38 kHz default (overridable per code) |
 | Serial baud rate | 115 200 |
 
 ---
