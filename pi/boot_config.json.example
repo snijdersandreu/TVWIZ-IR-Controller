@@ -1,0 +1,26 @@
+{
+  "tv1_power": {
+    "type": "NEC",
+    "value": "0x20DF10EF",
+    "bits": 32,
+    "send_on_boot": true,
+    "description": "Main hall TV — power on",
+    "delay_before_ms": 0
+  },
+  "tv2_power": {
+    "type": "RAW",
+    "freq": 38000,
+    "data": [9024, 4512, 564, 1692, 564, 564, 564, 1692],
+    "send_on_boot": true,
+    "description": "Breakout room TV — power on",
+    "delay_before_ms": 500
+  },
+  "projector_on": {
+    "type": "NEC",
+    "value": "0x807F827D",
+    "bits": 32,
+    "send_on_boot": false,
+    "description": "Projector — power on (disabled for now)",
+    "delay_before_ms": 0
+  }
+}
