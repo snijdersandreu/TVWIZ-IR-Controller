@@ -106,7 +106,14 @@ Raspberry Pi ──USB──► ESP32
 ### Installing Dependencies
 
 ```bash
-pip3 install pyserial
+sudo apt-get update
+sudo apt-get -f install -y
+sudo dpkg --configure -a
+sudo apt-get update
+```
+
+```bash
+sudo apt-get install python3-serial
 ```
 
 ### Give the Pi user access to the serial port
